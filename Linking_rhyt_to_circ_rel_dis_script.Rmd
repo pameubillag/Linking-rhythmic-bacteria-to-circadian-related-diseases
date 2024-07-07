@@ -1,0 +1,1252 @@
+---
+title: "Linking rhythmic bacteria to circadian-related diseases"
+author: "P_Ubilla-G"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(	echo = FALSE,	message = FALSE,	warning = FALSE)
+library(knitr)
+if(is_latex_output()) {
+  plot_default <- knit_hooks$get("plot")
+  knit_hooks$set(plot = function(x, options) {
+    x <- c(plot_default(x, options), "\\vspace{20pt}")
+  })
+}
+library(tidyverse)
+library(vegan)
+library(xtable)
+library(BiodiversityR)
+library(gridExtra)
+library(ggpubr)
+library(phyloseq)
+library(ggplot2)
+library(reshape2)
+library(gtools)
+library(cowplot)
+set.seed(7891)
+```
+
+```{r first step with downloaded data from curatedMetagenomicBase}
+## We douwnloaded all metadata and abundance data from curatedMetagenomicBase 3.3.3 in jan. 2022
+# set of metadata 
+metadatos <- read_csv("metadatos_curatedMetG3.3.3.csv")
+## abundance information by species in counts
+allcounts <- read_csv("counts_curated3.3.csv") # contained in linking_data.tar.xz #1643 bacterias y 18726 samples 
+
+## 1. there is duplicated samples because they were used in different studies. The samples are named MHO... used in LeChatelier 2013, Quin 2010 y Li 2014.
+
+nombredecols <- as.data.frame(colnames(allcounts))
+nombrecols<- nombredecols %>% rename(samplestudyid ="colnames(allcounts)") 
+nombrecols<- nombrecols %>%  filter(grepl("MH0", samplestudyid))
+
+separads <- nombrecols %>% separate(samplestudyid, c("sample", "study"), remove =  FALSE)
+
+# Take out 2 of 3 set of repeated
+lechate <- separads %>% filter(study =="LeChatelierE") %>% rename(sample_id ="sample")
+lemetadatos <- metadatos %>% filter(study_name=="LeChatelierE_2013")
+metaplusle <- left_join(lemetadatos, lechate, by= "sample_id")
+metaplu <- metaplusle %>% filter(is.na(study)) %>% select(-study, -samplestudyid)
+metaplusle0 <- metaplusle %>% filter(!is.na(study)) 
+metaplusle1 <- metaplusle0 %>% select(-study, -sample_id)
+metapluslechate <- metaplusle1 %>% rename(sample_id ="samplestudyid")
+metapluslechate2 <- rbind(metaplu, metapluslechate)
+
+metadatos2 <- metadatos %>% filter(study_name!="LeChatelierE_2013")
+metadatos3 <- rbind(metadatos2, metapluslechate2)
+
+# ahora nielsenhb
+nielsen <- separads %>% filter(study =="NielsenHB") %>% rename(sample_id ="sample")
+nielsendatos <- metadatos3 %>% filter(study_name=="NielsenHB_2014") %>% filter(grepl("MH0", subject_id))
+nielsendatosov <- metadatos3 %>% filter(study_name=="NielsenHB_2014") %>% filter(!grepl("MH0", subject_id))
+metaplusniel <- left_join(nielsendatos, nielsen, by= "sample_id")
+metaplusniel1 <- metaplusniel %>% select(-study, -sample_id)
+metaplusnielson <- metaplusniel1 %>% rename(sample_id ="samplestudyid")
+
+metadatos4 <- metadatos3 %>% filter(study_name!="NielsenHB_2014")
+
+metadata <- rbind(metadatos4, metaplusnielson, nielsendatosov)
+
+## 2. Select diseases of interest
+## the list of filtered studies corresponds to studies analizing "IBD", hypertension" , "ACVD", "CRC", "T2D"
+
+seleccionados <- metadata %>% filter(body_site == "stool", antibiotics_current_use == "no", age_category == "adult"| age_category == "senior" , sample_id != "MSM6J2HB") %>% filter(study_name == "JieZ_2017"| study_name == "GuptaA_2019" | study_name =="HanniganGD_2017"| study_name  == "ThomasAM_2018a"| study_name ==  "ThomasAM_2018b" | study_name ==  "HMP_2019_ibdmdb"| study_name == "LiJ_2017"| study_name == "SankaranarayananK_2015" | study_name == "KarlssonFH_2013" | study_name == "ZhuF_2020" | study_name == "ChengpingW_2017" | study_name == "LiSS_2016" | study_name == "YeZ_2018" | study_name =="QinN_2014") 
+# some senior are more than 70 years old.
+seleccionados21 <- seleccionados %>% filter(age_category == "adult" | age_category == "senior" & age <=70)
+
+## There are several samples of the same subjects in the metabolic syndrome dataset. This samples were taken after fecal microbiome transplant FMT and should be removed.
+seleccionados22 <- seleccionados21 %>% filter(study_condition != "FMT")
+
+## duplicates in a time series at HMP_2019 study. We are only interested in the first
+# ibd study
+repetibd <- seleccionados21 %>% filter(study_name == "HMP_2019_ibdmdb" ) %>% filter (visit_number==1) 
+
+others <- seleccionados22 %>%  filter(study_name != "HMP_2019_ibdmdb" ) 
+
+# funtion to paste metadatos with counts
+
+pasmetacount <- function (datoscount, metadatos){
+ datoscount1 <- as.data.frame(t(datoscount[, -1]))
+colnames(datoscount1) <- datoscount$...1
+datoscount1 <- rownames_to_column(datoscount1, var="sample_id")
+metadatos1 <- metadatos %>% select(sample_id, study_name, study_condition, disease, gender, country, sequencing_platform, age)
+merg <- merge (datoscount1, metadatos1)  
+countIDs <- merg %>% select (sample_id, study_name,study_condition, disease, gender, country, sequencing_platform, age, everything()) 
+return(countIDs)
+}
+
+allbut <- pasmetacount(allcounts, others) 
+ibd <-  pasmetacount(allcounts, repetibd)
+
+counts <-  rbind(allbut, ibd)
+sumas <- as.data.frame(colSums(counts[9:ncol(counts)]))
+
+#write_csv(counts, "disease_studies.csv")
+```
+
+```{r reference gut microbiome }
+# From the same curatedMetagenomicBase we downloaded abundance information transform to relative abundance. We will use this data to calculate prevalence, mean abundance and, rank of each bacteria. 
+
+# set of relative abundance by species 
+abreltodas <- read_csv("ab_rel_curated3.3.csv")   # # contained in linking_data.tar.xz # 1643 especies y 18726 
+
+## 1. First we filter healthy individuals, with no antibiotic treatment
+data1 <- metadata %>% filter(body_site == "stool", age_category == "adult"| age_category == "senior" & age <=70, sample_id != "MSM6J2HB", disease == "healthy", antibiotics_current_use == "no")
+abrelsubset <- data1$sample_id
+abrelsubset <- c("...1", abrelsubset)
+abrelhealthy <- abreltodas[ , c(abrelsubset)]
+
+# 2. We know there are subjects with more than one sample. In this case there are all control subjects, so we are going to ...
+metad <- metadata %>%  select(subject_id, sample_id, study_name)
+# Take out samples that sum less than 99.5 percent
+sumacien <- function(data){
+sumaciens <- as.data.frame(colSums(data[2:ncol(data)]))
+encien= which(sumaciens < 99.5) 
+data1 = abrelhealthy[,-c(encien)]
+return(data1)
+}
+abrel2 <- sumacien(abrelhealthy)
+# function to calculate mean in repeated samples
+promediarab <- function (abundancias, metadata){
+abs <- as.data.frame(t(abundancias[, -1]))
+colnames(abs) <- abundancias$...1  #
+abs <-rownames_to_column(abs, var ="sample_id")
+abs2ids <- merge(abs, metadata, by = "sample_id" )
+prevaEsp <- abs2ids %>%   group_by(subject_id) %>%   summarise(across(starts_with("k__"), ~mean(.x, na.rm = TRUE))) # se va la columna sample_id
+}
+relabundance <- promediarab(abrel2, metad)
+
+## Function to calculate basic stats
+basicstat <- function(abdata) {
+#prevalencia <- function (abdata){
+tabundancia <- as.data.frame(t(abdata[, -1])) # aunque aqui pierde el nombre de subject_id, no importa para lo que sigue
+sppresentes <- tabundancia %>% mutate_if(is.numeric, ~1 * (. > 0))
+dum <- as.data.frame(rowSums(sppresentes[2:ncol(sppresentes)])) #
+dum2 <-rownames_to_column(dum, var ="taxa")
+dum3 <- dum2 %>% rename (prevalencia = "rowSums(sppresentes[2:ncol(sppresentes)])")
+preva <- dum3 %>% mutate(perc_prev = prevalencia/ncol(sppresentes)*100)
+#tabundancia <- as.data.frame(t(abdata[, -(1:2)]))
+tabundancia$min_abRel <- apply(tabundancia[0:ncol(tabundancia)], 1, min, trim = FALSE)
+tabundancia$mean_abRel <- apply(tabundancia[0:ncol(tabundancia)], 1, mean)
+tabundancia$max_abRel <- apply(tabundancia[0:ncol(tabundancia)], 1, max, trim= FALSE)
+tabundancia$sd <- apply(tabundancia[0:ncol(tabundancia)], 1, sd)
+tabundancia$var <- apply(tabundancia[0:ncol(tabundancia)], 1, var)
+tabundancia <-rownames_to_column(tabundancia, var ="taxa")
+statEspecies <- tabundancia %>% select (taxa, min_abRel, mean_abRel, max_abRel, sd, var)
+statSp <- merge(statEspecies, preva, by = "taxa")
+
+statSp$Abundance_rank = rank(desc(statSp$mean_abRel))
+statSp$prevalence_rank = rank(desc(statSp$prevalencia))
+return(statSp)
+}
+
+## before appling the stats is necessary to discard bacteria with 0 sum in abundance over the database
+subid <- as.data.frame(relabundance$subject_id) %>% rename (subject_id = "relabundance$subject_id" )
+onlyrelab <- relabundance %>% select(-subject_id)
+spcero <- as.data.frame(colSums(onlyrelab))
+ceros = which(spcero <= 0)
+relabundance2 <- onlyrelab[,-c(ceros)] %>% cbind (subid) %>% select(subject_id, everything())
+
+statsabrel <- basicstat(relabundance2)
+statsshortname <- separate(statsabrel, taxa, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% select(-largename)
+
+#write_csv(statsshortname, "stats_reference_gutmbt_chapter1.csv")
+```
+
+```{r first step classify the species}
+## We cross the bacteria published in Reitmeier et al. 2021 and Thaiss et al. 2014 to classify species between rhythmic, non-rhythmic, and once rhythmic
+rei2013 <- read_csv("Reitmeier_mbt_cohorte_2013.csv")# supp. tab 2 Reitmeier et al. 2021
+
+reit.rit <- read_csv("Reitmeier_sup_tab7_modClean.csv") %>% filter(`adj. p-value cosine regression Control subjects` <= 0.05) %>% select(OTU, Name, "mean nonT2D") %>%  mutate(Rhythmicity_Reit = "yes") #supp. tab 7 Reitmeier et al. 2021
+
+reit <- as.data.frame (rei2013) %>% transform (mean_abundance = as.numeric(mean_abundance)) %>% filter (mean_abundance >= 0.1, prevalence >= 10)
+
+reit.rit.arit <- full_join(reit.rit, reit)
+reit.rit.arit$Rhythmicity_Reit[is.na(reit.rit.arit$Rhythmicity_Reit)] = "no"
+reit.rit.arit$rankab  = rank(desc(reit.rit.arit$mean_abundance))
+
+###
+reit.rit.arit2 <- reit.rit.arit %>%  rename(Taxon = "Name") %>% select(-"mean nonT2D", -mean_abundance, -prevalence) 
+reit.rit.arit2$Taxon <- gsub(" ", "_s_", reit.rit.arit2$Taxon)
+reit.rit.arit2$Taxon <- paste("g", reit.rit.arit2$Taxon, sep="_")
+
+reit.rit.arit22 <- reit.rit.arit2 %>%  select(-OTU) %>% distinct(Taxon, .keep_all = TRUE)
+
+## Thaiss data. 
+t1 <- read_csv("Thaiss_sup6_tab1_subj1_normal.csv") #Thaiss et al. 2014 supp. 6 tab 1
+t2 <- read_csv("Thaiss_sup6_tab2_subj2_normal.csv") #Thaiss et al. 2014 supp. 6 tab 2
+
+solosp_t1 <- t1 %>%   filter(grepl("s__", Taxon))
+solosp_t1$Taxon <- gsub("([^;]+;)*g__([^;]+);*s__([^;]+)?", "g_\\2_s_\\3", solosp_t1$Taxon)
+solosp_t1$mean_ab <- rowMeans(solosp_t1[,7:12])
+solosp_t1 <- solosp_t1 %>% select(Taxon, ADJ.P, mean_ab) %>% mutate(subj1 = "s1") %>% mutate(Rhythmicity_s1 = ifelse(ADJ.P <= 0.05, "yes1", "no1")) 
+
+solosp_t2 <- t2 %>%   filter(grepl("s__", Taxon))
+solosp_t2$Taxon <- gsub("([^;]+;)*g__([^;]+);*s__([^;]+)?", "g_\\2_s_\\3", solosp_t2$Taxon)
+solosp_t2$mean_ab <- rowMeans(solosp_t2[,7:26])
+solosp_t2 <- solosp_t2 %>% select(Taxon, ADJ.P, mean_ab) %>% mutate(subj2 = "s2") %>% mutate(Rhythmicity_s2 = ifelse(ADJ.P <= 0.05, "yes2", "no2")) 
+
+# Here we can't filter as in Reitmeier et al. because the magnitud of the abundances are lower than 0.01 (filter will let to 1 species in t1)
+
+solospt1.fil <- solosp_t1 %>% filter (mean_ab > 0) %>% select(-ADJ.P, -mean_ab)
+
+solospt2.fil <- solosp_t2 %>% filter (mean_ab > 0) %>% select(-ADJ.P, -mean_ab)
+
+thaissp.fil <- full_join(solospt1.fil, solospt2.fil)
+
+## ahora cruzar con las de reitmeier
+
+allrhythsp2 <- full_join(thaissp.fil, reit.rit.arit22, by = "Taxon" )
+
+#write_csv(allrhythsp2, "species_rhythmic_thaiss_reit_sp.csv")
+
+## Manually classified by colors and numbers according to the specified classes. Rhythmic= 1, non-rhythmic=2, at least once-rhythmic= 3
+
+classified.species <- read_csv("species_rhythmic_thaiss_reit_sp.csv") %>% select(-subj1, -Rhythmicity_s1, -subj2, -Rhythmicity_s2, -Rhythmicity_Reit, -Observation) %>% filter (!is.na(Type))
+
+## We randomly choose 8 of the non-rhythmic (13), and 8 of the once rhythmic (30)
+set.seed(7891)
+num_to_select <- 8
+selected_sp <- classified.species %>%   group_by(Type) %>%   sample_n(num_to_select, replace = FALSE)
+
+```
+
+```{r mapping rhythmic bacteria}
+
+## here we prepare the plot of rank abundance vs prevalence and table
+## list of rhythm bacteria
+
+rhyt <- data.frame(taxa = c("Bacteroides_dorei", "Bacteroides_uniformis" , "Bacteroides_vulgatus", "Bacteroides_koreensis" , "Roseburia_faecis", "Ruminococcus_torques" , "Dorea_formicigenerans" , "Ruminococcus_gnavus" ), Rhythmicity = c("yes","yes","yes","yes","yes","yes","yes","yes"))
+
+masrit <- left_join(statsshortname, rhyt)
+masrit[is.na(masrit)] = "no"
+
+crudplot <- qplot ((perc_prev), (mean_abRel),    data = masrit,  alpha = I(0.7),  size=I(2), xlab = "% of Prevalence" , ylab =  "% Mean Relative Abundance", color = Rhythmicity) + scale_color_manual(values=c("black", "orange", "#56B4E9")) 
+crudplot <- crudplot + theme (legend.position = "none", panel.background = element_rect(fill = "white", colour = "black", linewidth =1.2), panel.grid.major.x = element_blank())
+
+
+crudplotlog <- qplot(  log(perc_prev), log(mean_abRel),    data = masrit,  alpha = I(0.8),  size=I(0.7), xlab = "log % of Prevalence" , ylab =  " log % Mean Relative Abundance", color = Rhythmicity) + scale_color_manual(values=c("Dark grey", "blue", "#56B4E9")) 
+crudplotlog +theme (legend.position = "none", panel.background = element_rect(fill = "white", colour = "black", linewidth =1.5), panel.grid.major.x = element_blank()) # +theme_classic2()
+
+plot
+# print table
+rhytmap <- masrit %>% filter(Rhythmicity == "yes") %>%  select(taxa, mean_abRel, perc_prev, Abundance_rank, prevalence_rank) %>% arrange(Abundance_rank)
+knitr::kable(rhytmap)
+```
+
+```{r mapping rhythmic in diseases data set}
+controlacvd <- counts %>%  filter(study_name == "JieZ_2017")
+controlibd<- counts %>% filter (study_name == "HMP_2019_ibdmdb")
+controlhyp <- counts %>% filter (study_name == "LiJ_2017") %>%  filter(study_condition != "pre-hypertension")
+controlmetsyn <- counts %>% filter (study_name == "LiSS_2016") %>%  filter(disease == "metabolic_syndrome" | disease == "healthy")
+
+controlcrc1 <- counts %>% filter (study_name == "GuptaA_2019")
+controlcrc2 <- counts %>% filter (study_name == "HanniganGD_2017") %>%  filter(disease != "adenoma")
+controlcrc3 <- counts %>% filter (study_name == "ThomasAM_2018a") %>%  filter(disease == "CRC" | disease == "healthy")
+controlcrc4 <- counts %>% filter (study_name =="ThomasAM_2018b")
+
+controlt2d1 <- counts %>% filter (study_name == "KarlssonFH_2013") %>% filter (disease == "T2D" | disease == "healthy")
+controlt2d2 <- counts %>% filter (study_name ==  "SankaranarayananK_2015")
+
+## "non"-circadian related
+# controladenoma1 <- counts %>% filter (study_name == "ThomasAM_2018a") %>%  filter(disease == "adenoma" | disease == "healthy")
+# controladenoma2 <- counts %>% filter (study_name == "HanniganGD_2017") %>%  filter(disease != "CRC") ## I think that as "some types of cancer" are circadian related, we can't discard that the adenoma could be also related to circadian desynchronization. 
+
+## controligt <- counts %>% filter (study_name == "KarlssonFH_2013") %>%  filter(disease == "IGT" | disease == "healthy") ## not a disease related to circadian disruption produced by t2d
+
+controlcirr <- counts %>% filter (study_name == "QinN_2014") %>%  filter(disease == "cirrhosis" | disease == "healthy")
+
+## In chenping et al. study used the qin 2014 healthy individuals as controls. The disease AS is marked in the study_condition column
+#controlAS <-  counts %>% filter (study_name == "ChengpingW_2017" | study_name == "QinN_2014") %>% filter (disease == "RA" | disease == "healthy") 
+##disruption of the circadian clock in patients with the disease and levels of melatonine. But it seem that the disruption is consecuence of the disease. since it is an immune disease (an immune diseases have been related to CC (Awuah, 2023) then it shouldn't be used as not related )
+
+# controlbd <- counts %>% filter (study_name == "YeZ_2018") %>% filter (disease == "BD" | disease == "healthy") # Behcet disease is an auto-inflammatory systemic vasculitis of unknown etiology. Then, as it is also autoimmune then it shouldn't be recomended to be used. 
+
+controlschi <- counts %>% filter (study_name == "ZhuF_2020") %>% filter (disease == "schizofrenia" | disease == "healthy")
+
+basicstat2 <- function(abundancia) {
+  abundancia <- abundancia %>% select(-study_condition, -gender, -country, -sequencing_platform, -age)
+  tabundancia <- as.data.frame(t(abundancia[, -(1:4)])) 
+    sppresentes <- tabundancia %>% mutate_if(is.numeric, ~1 * (. > 0))
+  dum <- as.data.frame(rowSums(sppresentes[4:ncol(sppresentes)])) # 
+  dum2 <-rownames_to_column(dum, var ="taxa")
+  dum3 <- dum2 %>% rename (prevalencia = "rowSums(sppresentes[4:ncol(sppresentes)])")
+  preva <- dum3 %>% mutate(perc_prev = prevalencia/ncol(sppresentes)*100)
+
+  tabundancia$min_abRel <- apply(tabundancia[0:ncol(tabundancia)], 1, min, trim = FALSE)
+tabundancia$mean_abRel <- apply(tabundancia[0:ncol(tabundancia)], 1, mean)
+tabundancia$max_abRel <- apply(tabundancia[0:ncol(tabundancia)], 1, max, trim= FALSE)
+tabundancia$sd <- apply(tabundancia[0:ncol(tabundancia)], 1, sd)
+tabundancia$var <- apply(tabundancia[0:ncol(tabundancia)], 1, var)
+tabundancia <-rownames_to_column(tabundancia, var ="taxa")
+statEspecies <- tabundancia %>% select (taxa, min_abRel, mean_abRel, max_abRel, sd, var)
+statSp <- merge(statEspecies, preva, by = "taxa") 
+statSp <- statSp %>% filter(prevalencia >= 1)
+statsp <- separate(statSp, taxa, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% select(-largename)
+statsp$Abundance_rank = rank(desc(statsp$mean_abRel))
+statsp$prevalence_rank = rank(desc(statsp$prevalencia))
+return(statsp)
+}
+rtsp <- rhyt$taxa
+
+c.acvd.stat <- basicstat2(controlacvd ) %>% filter (taxa %in% rtsp)
+c.crc1.stat <- basicstat2(controlcrc1) %>% filter (taxa %in% rtsp)
+c.crc2.stat <- basicstat2(controlcrc2) %>% filter (taxa %in% rtsp)
+c.crc3.stat <- basicstat2(controlcrc3) %>% filter (taxa %in% rtsp)
+c.crc4.stat <- basicstat2(controlcrc4) %>% filter (taxa %in% rtsp)
+c.ibd.stat <- basicstat2(controlibd)  %>% filter (taxa %in% rtsp)
+c.hyp.stat <- basicstat2(controlhyp)  %>% filter (taxa %in% rtsp)
+c.t2d1.stat <- basicstat2(controlt2d1)  %>% filter (taxa %in% rtsp)
+c.t2d2.stat <- basicstat2(controlt2d2) %>% filter (taxa %in% rtsp)
+c.mets.stat <- basicstat2(controlmetsyn) %>% filter (taxa %in% rtsp)
+
+#c.aden1.stat <- basicstat2(controladenoma1) %>% filter (taxa %in% rtsp)
+#c.aden2.stat <- basicstat2(controladenoma2) %>% filter (taxa %in% rtsp)
+#c.igt.stat <- basicstat2(controligt) %>% filter (taxa %in% rtsp)
+c.sch.stat <- basicstat2(controlschi)  %>% filter (taxa %in% rtsp)
+#c.as.stat <- basicstat2(controlAS)  %>% filter (taxa %in% rtsp)
+#c.bd.stat <- basicstat2(controlbd)  %>% filter (taxa %in% rtsp)
+c.cirr.stat <- basicstat2(controlcirr) %>% filter (taxa %in% rtsp)
+
+```
+
+```{r preparing data as phyloseq object to run diversity analysis}
+
+counts2 <- counts
+counts2$study_condition <- gsub("metabolic_syndrome","MS", counts$study_condition) #%>% 
+counts2$disease <- gsub("metabolic_syndrome","MS", counts$disease)
+
+count_table = as.matrix(t(counts2[, -(1:9)]))
+rownames(count_table) <- paste0(colnames(counts2[,-(1:9)]))
+colnames(count_table) <- paste0(counts2$sample_id)
+
+# taxonomic matrix
+otuespec <- as.data.frame(rownames(count_table)) %>% rename (taxa = "rownames(count_table)")
+otues <- separate(otuespec, taxa, into = (c("a","b" , "Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Domain2", "Phylum2", "Class2", "Order2", "Species2")), extra = "merge", remove =F)
+taxonomic <- otues %>% select ( b, Phylum, Order, Genus, Domain2, Class2, Species2) %>% rename( Kingdom = "b",Class = "Order" , Order = "Genus" ,  Family = "Domain2", Genus ="Class2", Species = "Species2")
+taxonomic<- as.matrix(taxonomic)
+rownames(taxonomic) <- paste0(colnames(counts2[,-(1:9)]))
+
+OTU = otu_table(count_table, taxa_are_rows = T)
+TAX = tax_table(taxonomic)
+physeq = phyloseq(OTU, TAX)
+
+sampledata = sample_data(data.frame(SampleId = counts2$sample_id , study_condition= counts2$study_condition, Study = counts2$study_name, gender = counts2$gender, country = counts2$country, Disease = counts2$disease, plataforma = counts2$sequencing_platform , age = counts2$age ,row.names=sample_names(physeq)))
+
+
+phylobj <- merge_phyloseq(physeq, sampledata)
+  sample_data(phylobj)$HealthState <- as.factor(sample_data(phylobj)$Disease)
+  sample_data(phylobj)$SampleID <- as.factor(sample_data(phylobj)$SampleId)
+
+```
+
+```{r richness comparision, fig.height = 10, fig.width= 12, echo=FALSE}
+# Separe data by study and insidfphyibd# Separe data by study and inside the study the disease of interest and healthy
+
+phyacvd <- subset_samples(phylobj, (Study == "JieZ_2017" & (Disease== "healthy" | Disease=="ACVD") ))
+phyibd <- subset_samples(phylobj, Study ==  "HMP_2019_ibdmdb" & (Disease== "healthy"|Disease=="IBD"))
+phyhyp <- subset_samples(phylobj, Study ==  "LiJ_2017"& (study_condition !="pre-hypertension"))
+phymets<- subset_samples(phylobj, Study == "LiSS_2016"& (Disease== "healthy"|Disease=="MS"))
+phycrc1 <-  subset_samples(phylobj, Study == "GuptaA_2019"& (Disease== "healthy"|Disease=="CRC") )
+phycrc2 <-  subset_samples(phylobj, Study == "HanniganGD_2017"& (Disease== "healthy"|Disease=="CRC"))
+phycrc3 <-  subset_samples(phylobj, Study== "ThomasAM_2018a"& (Disease== "healthy"|Disease=="CRC"))
+phycrc4 <-  subset_samples(phylobj, Study==  "ThomasAM_2018b"& (Disease== "healthy"|Disease=="CRC"))
+phyt2d1 <- subset_samples(phylobj, Study ==  "KarlssonFH_2013"& (Disease== "healthy"|Disease=="T2D"))
+phyt2d2 <- subset_samples(phylobj, Study == "SankaranarayananK_2015"& (Disease== "healthy"|Disease=="T2D"))
+
+## not circadian assoc
+# phyade1 <- subset_samples(phylobj, Study ==  "ThomasAM_2018a"& (Disease== "healthy"|Disease=="adenoma"))
+# phyade2 <-  subset_samples(phylobj, Study == "HanniganGD_2017"& (Disease== "healthy"|Disease=="adenoma") )
+# phyigt <-  subset_samples(phylobj, Study == "KarlssonFH_2013"& (Disease== "healthy"|Disease=="IGT"))
+ phycirr <-  subset_samples(phylobj, Study== "QinN_2014"& (Disease== "healthy"|Disease=="cirrhosis"))
+# phyAS <-  subset_samples(phylobj, Study=="ChengpingW_2017" | Study== "QinN_2014" & (Disease== "healthy"|Disease=="RA"))
+ physch <- subset_samples(phylobj, Study == "ZhuF_2020"& (Disease== "healthy"|Disease=="schizofrenia"))
+# phybd <- subset_samples(phylobj, Study == "YeZ_2018"& (Disease== "healthy"|Disease=="BD"))
+
+# Filter taxas with zero abundance across samples
+
+fphyacvd <- filter_taxa(phyacvd, function(x) sum(x) > 0, TRUE) 
+fphyibd <- filter_taxa(phyibd, function(x) sum(x) > 0, TRUE)
+fphyhyp <- filter_taxa(phyhyp, function(x) sum(x) > 0, TRUE)
+fphycrc1 <- filter_taxa(phycrc1, function(x) sum(x) > 0, TRUE)
+fphycrc2 <- filter_taxa(phycrc2, function(x) sum(x) > 0, TRUE)
+fphycrc3 <- filter_taxa(phycrc3, function(x) sum(x) > 0, TRUE)
+fphycrc4 <- filter_taxa(phycrc4, function(x) sum(x) > 0, TRUE)
+fphyt2d1 <- filter_taxa(phyt2d1, function(x) sum(x) > 0, TRUE)
+fphyt2d2 <- filter_taxa(phyt2d2, function(x) sum(x) > 0, TRUE)
+fphymets <- filter_taxa(phymets, function(x) sum(x) > 0, TRUE)
+
+#fphyade1 <- filter_taxa(phyade1, function(x) sum(x) > 0, TRUE)
+# fphyade2 <- filter_taxa(phyade2, function(x) sum(x) > 0, TRUE)
+# fphyigt <- filter_taxa(phyigt, function(x) sum(x) > 0, TRUE)
+ fphycirr <- filter_taxa(phycirr, function(x) sum(x) > 0, TRUE)
+# fphyas <- filter_taxa(phyAS, function(x) sum(x) > 0, TRUE)
+ fphysch <- filter_taxa(physch, function(x) sum(x) > 0, TRUE)
+# fphybd <- filter_taxa(phybd, function(x) sum(x) > 0, TRUE)
+
+## alpha diversity Table
+fwilctable <- function(data, disease){
+  tab.acvd <- estimate_richness(data, measures = c("Observed", "Shannon", "Simpson"))
+ob <- (pairwise.wilcox.test(tab.acvd$Observed, sample_data(data)$Disease, p.adjust.method = NULL))
+sim <- pairwise.wilcox.test(tab.acvd$Simpson, sample_data(data)$Disease, p.adjust.method = NULL)
+shan <- pairwise.wilcox.test(tab.acvd$Shannon, sample_data(data)$Disease, p.adjust.method = NULL)
+
+# ob <- (kruskal.test(tab.acvd$Observed, sample_data(data)$Disease, p.adjust.method = NULL))
+# sim <- kruskal.test(tab.acvd$Simpson, sample_data(data)$Disease, p.adjust.method = NULL)
+# shan <- kruskal.test(tab.acvd$Shannon, sample_data(data)$Disease, p.adjust.method = NULL)
+
+o <- as.data.frame(ob[["p.value"]]) %>% rename(Observed = disease)
+sh <- as.data.frame(shan[["p.value"]]) %>% rename(Shannon = disease)
+si <- as.data.frame(sim[["p.value"]]) %>% rename(Simpson = disease)
+pv <-cbind (o, sh, si)
+pv2 <- rownames_to_column(pv, var ="-")
+pv2$`-`[pv2$`-` == "healthy"] <- "p-value"
+
+medobs <- tab.acvd %>%  group_by(sample_data(data)$Disease) %>% summarize(mean_r = mean(Observed)) %>% rename("-" = "sample_data(data)$Disease", Observed = "mean_r")
+medsim <- tab.acvd %>%  group_by(sample_data(data)$Disease) %>% summarize(mean_r = mean(Simpson))%>% rename("-" = "sample_data(data)$Disease", Simpson = "mean_r")
+medsh <- tab.acvd %>%  group_by(sample_data(data)$Disease) %>% summarize(mean_r = mean(Shannon))%>% rename("-" = "sample_data(data)$Disease", Shannon = "mean_r")
+
+med <- merge(medobs, medsh)
+med <- merge(med,medsim )
+final <- rbind(med, pv2)
+return(final)
+}
+
+fwilctable2 <- function(data, disease){
+  tab.acvd <- estimate_richness(data, measures = c("Observed", "Shannon", "Simpson"))
+ob <- (pairwise.wilcox.test(tab.acvd$Observed, sample_data(data)$Disease, p.adjust.method = NULL))
+sim <- pairwise.wilcox.test(tab.acvd$Simpson, sample_data(data)$Disease, p.adjust.method = NULL)
+shan <- pairwise.wilcox.test(tab.acvd$Shannon, sample_data(data)$Disease, p.adjust.method = NULL)
+
+# ob <- (kruskal.test(tab.acvd$Observed, sample_data(data)$Disease, p.adjust.method = NULL))
+# sim <- kruskal.test(tab.acvd$Simpson, sample_data(data)$Disease, p.adjust.method = NULL)
+# shan <- kruskal.test(tab.acvd$Shannon, sample_data(data)$Disease, p.adjust.method = NULL)
+
+o <- as.data.frame(ob[["p.value"]]) %>% rename(Observed = "healthy")
+sh <- as.data.frame(shan[["p.value"]]) %>% rename(Shannon = "healthy")
+si <- as.data.frame(sim[["p.value"]]) %>% rename(Simpson = "healthy")
+pv <-cbind (o, sh, si)
+pv2 <- rownames_to_column(pv, var ="-")
+pv2$`-`[pv2$`-` == disease] <- "p-value"
+
+medobs <- tab.acvd %>%  group_by(sample_data(data)$Disease) %>% summarize(mean_r = mean(Observed)) %>% rename("-" = "sample_data(data)$Disease", Observed = "mean_r")
+medsim <- tab.acvd %>%  group_by(sample_data(data)$Disease) %>% summarize(mean_r = mean(Simpson))%>% rename("-" = "sample_data(data)$Disease", Simpson = "mean_r")
+medsh <- tab.acvd %>%  group_by(sample_data(data)$Disease) %>% summarize(mean_r = mean(Shannon))%>% rename("-" = "sample_data(data)$Disease", Shannon = "mean_r")
+
+med <- merge(medobs, medsh)
+med <- merge(med,medsim )
+final <- rbind(med, pv2)
+return(final)
+}
+
+acvdtab <- fwilctable(fphyacvd, "ACVD")
+crc1tab <- fwilctable(fphycrc1, "CRC")
+crc2tab <- fwilctable(fphycrc2, "CRC")
+crc3tab <- fwilctable(fphycrc3, "CRC")
+crc4tab <- fwilctable(fphycrc4, "CRC")
+ibdtab <- fwilctable2(fphyibd, "IBD")
+hyptab <- fwilctable2(fphyhyp, "hypertension")
+t2d1tab <- fwilctable2(fphyt2d1, "T2D")
+t2d2tab <- fwilctable2(fphyt2d2, "T2D")
+metstab <- fwilctable2(fphymets, "MS")
+
+# ade1tab <- fwilctable(fphyade1, "adenoma")
+# ade2tab <- fwilctable(fphyade2, "adenoma")
+# igttab <- fwilctable2(fphyigt, "IGT")
+ cirtab <- fwilctable(fphycirr, "cirrhosis")
+# astab <- fwilctable2(fphyas, "RA")
+ schtab <- fwilctable2(fphysch, "schizofrenia")
+# bdtab <- fwilctable(fphybd, "BD")
+
+kable(list(acvdtab, ibdtab, hyptab, crc1tab, crc2tab, crc3tab, crc4tab, t2d1tab, t2d2tab, metstab, cirtab,schtab) )
+#tlat <- kable(list(acvdtab, ibdtab, hyptab, crc1tab, crc2tab, crc3tab, crc4tab, t2d1tab, t2d2tab), format= "latex" , digits = 2) ##supplementary tables
+
+########
+#alpha diversity gaphs
+# comparsion sets
+compara1 <- list(c("healthy", "ACVD"))
+compara2 <- list(c("healthy", "IBD"))
+compara3 <- list(c("healthy", "CRC"))
+compara4 <- list(c("healthy", "hypertension"))
+compara5 <- list(c("healthy", "T2D"))
+compara6 <- list(c("healthy", "MS"))
+ compara7 <- list(c("healthy", "adenoma"))
+# compara8 <- list(c("healthy", "IGT"))
+# compara9 <- list(c("healthy", "cirrhosis"))
+# compara10 <- list(c("healthy", "RA"))
+ compara11 <- list(c("healthy", "schizofrenia"))
+# compara12 <- list(c("healthy", "BD"))
+
+# function to calculate richness and graph - Chao1 and observed were equal, so we just show Observed
+fgraf <- function(datos, disease, compara) {
+  plo = plot_richness(datos, measures = c( "Shannon", "Observed", "Simpson"), x="Disease", color ="Disease")
+plo$data$Disease <- as.character(plo$data$Disease)
+plotorder <- c("healthy", disease)
+plo$data$Disease <- factor(plo$data$Disease, levels = plotorder)
+plotrich <- plo + geom_violin(width=.7)+ geom_boxplot(width=.1, outlier.shape=NA) + ggpubr::stat_compare_means(comparisons = compara, size = 2, method = "wilcox.test")  + scale_colour_manual(values = c("turquoise", "purple")) + theme_bw(base_size = 7.5) + theme (legend.position = "none",  axis.title.x=element_blank())#  + theme(axis.text.x = element_text(size = 4)) # this later is to reduce the size in ms
+}
+
+pra <-fgraf(fphyacvd, "ACVD", compara1)
+pri <-fgraf(fphyibd, "IBD", compara2)
+prh <-fgraf(fphyhyp, "hypertension", compara4)
+pms <- fgraf(fphymets, "MS", compara6)
+##  CRC y T2D
+prt1 <-fgraf(fphyt2d1, "T2D", compara5)
+prt2 <-fgraf(fphyt2d2, "T2D", compara5)
+prc1 <-fgraf(fphycrc1, "CRC", compara3)
+prc2 <-fgraf(fphycrc2, "CRC", compara3)
+prc3 <-fgraf(fphycrc3, "CRC", compara3)
+prc4 <-fgraf(fphycrc4, "CRC", compara3)
+
+# prade1 <-fgraf(fphyade1, "adenoma", compara7)
+# prade2 <-fgraf(fphyade2, "adenoma", compara7)
+# prigt <-fgraf(fphyigt, "IGT", compara8)
+ prcir <-fgraf(fphycirr, "cirrhosis", compara9)
+# pras <-fgraf(fphyas, "RA", compara10)
+ prsch <-fgraf(fphysch, "schizofrenia", compara11)
+# prbd <-fgraf(fphybd, "BD", compara12)
+ 
+ 
+# grid.arrange(pra, pri, prh, ncol=2, nrow = 2)
+# grid.arrange(prt1, prt2 , ncol=2, nrow = 1)
+# 
+# grid.arrange(prc1, prc2,prc3, prc4 , ncol=2, nrow = 2)
+
+pra
+pri
+prh
+prt1
+prt2
+prc1
+prc2
+prc3
+prc4
+prcir
+prsch 
+alphadivp <- cowplot::plot_grid(pra, pri, prh, pms, prt1, prt2 , ncol= 2,
+                   labels =c("A", "B", "C", "D", "E", "F"), label_size = 11,
+                   label_x = c(0.01,0.01,0.01, 0.01,0.01,0.01),
+                   label_y = c(0.98,0.98,0.98,0.98,0.98,0.98))
+
+
+alphadiv2 <- cowplot::plot_grid(prc1, prc2,prc3, prc4, prcir, prsch , ncol= 2,
+                   labels =c("G", "H", "I", "J", "K", "L"), label_size = 11,
+                   label_x = c(0.01,0.01,0.01, 0.01,0.01,0.01),
+                   label_y = c(0.98,0.98,0.98,0.98,0.98,0.98))
+
+
+alphadivp
+alphadiv2
+```
+
+```{r beta-diversity bray boxplot, fig.height = 3, fig.width= 4}
+# distance and plot function extracted from https://github.com/jeffkimbrel/jakR/blob/master/R/plotDistances.R
+# p = your phyloseq object
+# m = distance metric
+# s = phyloseq sample data column with your sample names
+# d = sample data for groups
+
+plot_distances = function(p, m, s, d) {
+  # calc distances
+  wu.m = phyloseq::distance(p, m) %>%
+    as.matrix() %>%
+    as.data.frame() %>%
+    rownames_to_column("Var1") %>%
+    pivot_longer(cols = c(everything(), -Var1), names_to = "Var2", values_to = "value") %>%
+    filter(as.character(Var1) != as.character(Var2))
+  # get sample data (sd)(S4 error OK and expected)
+  sd = data.frame(sample_data(p)) %>%
+    select(s, d) %>%
+    mutate_if(is.factor, as.character)
+  # combined distances with sample data
+  colnames(sd) = c("Var1", "Type1")
+  wu.sd = left_join(wu.m, sd, by = "Var1")
+
+  colnames(sd) = c("Var2", "Type2")
+  wu.sd = left_join(wu.sd, sd, by = "Var2")
+
+  # plot
+  plot_object = ggplot(wu.sd, aes(x = Type2, y = value)) +
+    theme_bw() +
+    geom_point(size=0.2) +
+    geom_boxplot(aes(color = ifelse(Type1 == Type2, "red", "black"))) +
+    stat_summary(fun.y="mean", color= "green", size=0.3)+
+    scale_color_identity() +
+    facet_wrap(~ Type1, scales = "free_x") +
+    theme(axis.text.x=element_text(angle = 90, hjust = 1, vjust = 0.5), legend.position = "none") +
+    labs(y = "Bray-Curtis", x = element_blank()) 
+  # rename dataframe back to original names
+  s1 = paste(s, "1", sep = "_")
+  s2 = paste(s, "2", sep = "_")
+  d1 = paste(d, "1", sep = "_")
+  d2 = paste(d, "2", sep = "_")
+
+  df = wu.sd %>%
+    dplyr::rename(!!s1 := "Var1") %>%
+    dplyr::rename(!!s2 := "Var2") %>%
+    dplyr::rename(!!d1 := "Type1") %>%
+    dplyr::rename(!!d2 := "Type2")
+
+  l = list("plot" = plot_object, "df" = df)
+  return(l)
+}
+#todist <- plot_distances(todostud, m= "bray", s= "SampleID", d = "HealthState" )
+acvddist <- plot_distances(fphyacvd, m= "bray", s= "SampleID", d = "HealthState" )
+ibddist <- plot_distances(fphyibd, m= "bray", s= "SampleID", d = "HealthState" )
+hypdist <- plot_distances(fphyhyp, m= "bray", s= "SampleID", d = "HealthState" )
+crc1dist <- plot_distances(fphycrc1, m= "bray", s= "SampleID", d = "HealthState" )
+crc2dist <- plot_distances(fphycrc2, m= "bray", s= "SampleID", d = "HealthState" )
+crc3dist <- plot_distances(fphycrc3, m= "bray", s= "SampleID", d = "HealthState" )
+crc4dist <- plot_distances(fphycrc4, m= "bray", s= "SampleID", d = "HealthState" )
+t2d1dist <- plot_distances(fphyt2d1, m= "bray", s= "SampleID", d = "HealthState" )
+t2d2dist <- plot_distances(fphyt2d2, m= "bray", s= "SampleID", d = "HealthState" )
+metsdist <- plot_distances(fphymets, m= "bray", s= "SampleID", d = "HealthState" )
+
+# ade1dist <- plot_distances(fphyade1, m= "bray", s= "SampleID", d = "HealthState" )
+# ade2dist <- plot_distances(fphyade2, m= "bray", s= "SampleID", d = "HealthState" )
+# igtdist <- plot_distances(fphyigt, m= "bray", s= "SampleID", d = "HealthState" )
+ cirrdist <- plot_distances(fphycirr, m= "bray", s= "SampleID", d = "HealthState" )
+# asdist <- plot_distances(fphyas, m= "bray", s= "SampleID", d = "HealthState" )
+ schdist <- plot_distances(fphysch, m= "bray", s= "SampleID", d = "HealthState" )
+# bddist <- plot_distances(fphybd, m= "bray", s= "SampleID", d = "HealthState" )
+
+#grid.arrange(acvddist$plot, ibddist$plot, hypdist$plot, ncol=3)
+# grid.arrange(crc1dist$plot, crc2dist$plot, crc3dist$plot, crc4dist$plot, ncol=4)
+# grid.arrange(t2d1dist$plot, t2d2dist$plot, ncol=2)
+
+#grid.arrange(acvddist$plot, ibddist$plot, hypdist$plot, crc1dist$plot, crc2dist$plot, crc3dist$plot, crc4dist$plot, t2d1dist$plot, t2d2dist$plot, ncol=9)
+
+grid.arrange(acvddist$plot, ibddist$plot, hypdist$plot,metsdist$plot, ncol=4)
+grid.arrange(crc1dist$plot, crc2dist$plot, crc3dist$plot, ncol=3)
+grid.arrange(crc4dist$plot, t2d1dist$plot, t2d2dist$plot, ncol=3)
+
+grid.arrange(cirrdist$plot,  schdist$plot,  ncol=4)
+
+dissimplots <- cowplot::plot_grid(acvddist$plot, ibddist$plot, hypdist$plot,metsdist$plot,crc1dist$plot, crc2dist$plot, crc3dist$plot, crc4dist$plot, t2d1dist$plot, t2d2dist$plot, cirrdist$plot,  schdist$plot, ncol= 4, nrow= 3, 
+                   labels =c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"), label_size = 14,
+                   label_x = c(0.01,0.01,0.01, 0.01,0.01,0.01,0.01,0.01,0.01, 0.01,0.01,0.01),
+                   label_y = c(1,1,1,1,1,1,1,1,1,1,1,1))
+
+## Summary tables 
+kable(sacvd <- acvddist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(sibd <- ibddist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(shyp <- hypdist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value) , median(value), sd(value)), "latex", digits = 2 )
+kable(scrc1 <- crc1dist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(scrc2 <- crc2dist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(scrc3 <- crc3dist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(scrc4 <- crc4dist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(st2d1 <- t2d1dist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(st2d2 <- t2d2dist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(sms <- metsdist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+
+kable(st2d2 <- t2d2dist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(sms <- metsdist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+
+kable(scirr <- cirrdist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+kable(ssch <- schdist$df %>% group_by(HealthState_1, HealthState_2) %>%  summarise(mean(value), median(value), sd(value)), "latex", digits = 2 )
+
+
+```
+
+```{r beta-diversity bray-curtis NMDS, fig.height = 5, fig.width= 5, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+# calculate beta-div with ordinate function
+
+ordacvd <- ordinate(fphyacvd, method = "NMDS", distance = "bray", trymax = 9999); # stress 0.22 (41 tries)
+ordibd <- ordinate(fphyibd, method = "NMDS", distance = "bray", trymax = 9999); # stress 0.22 (127 tries)
+ordhyp <- ordinate(fphyhyp, method = "NMDS", distance = "bray", trymax = 9999); 
+ordmets <- ordinate(fphymets, method = "NMDS", distance = "bray", trymax = 9999); 
+
+ordt2d1 <- ordinate(fphyt2d1, method = "NMDS", distance = "bray", trymax = 9999); #o.205, 58 tries
+ordt2d2 <- ordinate(fphyt2d2, method = "NMDS", distance = "bray", trymax = 9999); # 0.2235(40 tries)
+
+ordcrc1 <- ordinate(fphycrc1, method = "NMDS", distance = "bray", trymax = 9999); # stress 0.196 (45 tries)
+ordcrc2 <- ordinate(fphycrc2, method = "NMDS", distance = "bray", trymax = 9999); # 0.172 (2133 )
+ordcrc3 <- ordinate(fphycrc3, method = "NMDS", distance = "bray", trymax = 9999); # 0.181 22 tries
+ordcrc4 <- ordinate(fphycrc4, method = "NMDS", distance = "bray", trymax = 9999); # 0.176  (1497 tries)
+
+#ordade1 <- ordinate(fphyade1, method = "NMDS", distance = "bray", trymax = 9999);
+#ordade2 <- ordinate(fphyade2, method = "NMDS", distance = "bray", trymax = 9999); 
+#ordigt <- ordinate(fphyigt, method = "NMDS", distance = "bray", trymax = 9999); 
+ordcir <- ordinate(fphycirr, method = "NMDS", distance = "bray", trymax = 9999); 
+#ordas <- ordinate(fphyas, method = "NMDS", distance = "bray", trymax = 9999); 
+ordsch <- ordinate(fphysch, method = "NMDS", distance = "bray", trymax = 9999); 
+#ordbd <- ordinate(fphybd, method = "NMDS", distance = "bray", trymax = 9999); 
+
+# function to plot with ellipse
+graficaconeli <- function(phyloseq, ordin, disease, titulo){
+  pcrc <- plot_ordination(phyloseq, ordin, type ="Disease", color="Disease", title = titulo) 
+ plotorder <- c(disease, "healthy")
+pcrc$data$Disease <- factor(pcrc$data$Disease, levels = plotorder)
+ pcrc + stat_ellipse(aes(colour=Disease), level = 0.95 , linetype = 1, type = "t", inherit.aes = T)  +scale_colour_manual(values = c( "purple", "turquoise")) + theme_bw(base_size = 10)+ theme (legend.position = "none",  plot.title = element_text(size=14, face="bold"))
+}
+
+graficarconeli <-function (phyloseq, ordin, disease){
+ pcrc <- plot_ordination(phyloseq, ordin, type ="Disease", color="Disease") 
+ plotorder <- c(disease, "healthy")
+pcrc$data$Disease <- factor(pcrc$data$Disease, levels = plotorder)
+pcrc + stat_ellipse(aes(colour=Disease), level = 0.95 , linetype = 1, type = "t", inherit.aes = T)  +scale_colour_manual(values = c( "purple", "turquoise")) + theme_bw(base_size = 10)+ theme(legend.position = "none")
+}
+
+pacvd <- graficarconeli(fphyacvd, ordacvd, "ACVD")#, "ACVD vs Healthy")
+pibd <- graficarconeli(fphyibd, ordibd, "IBD" )#"IBD vs Healthy")
+phyp <- graficarconeli(fphyhyp, ordhyp, "hypertension")#, "Hypertension vs Healthy")
+pmets<- graficarconeli(fphymets, ordmets, "MS")#, )
+
+pcrc1 <- graficarconeli(fphycrc1, ordcrc1, "CRC")
+pcrc2 <- graficarconeli(fphycrc2 , ordcrc2, "CRC")
+pcrc3 <- graficarconeli(fphycrc3, ordcrc3, "CRC")
+pcrc4 <- graficarconeli(fphycrc4, ordcrc4, "CRC")
+
+pt2d1 <- graficarconeli(fphyt2d1, ordt2d1, "T2D")
+pt2d2 <- graficarconeli(fphyt2d2, ordt2d2, "T2D")
+
+#pade1 <- graficarconeli(fphyade1, ordade1, "adenoma")
+#pade2 <- graficarconeli(fphyade2 , ordade2, "adenoma")
+#pigt <- graficarconeli(fphyigt, ordigt, "IGT")
+pcir <- graficarconeli(fphycirr, ordcir, "cirrhosis")
+#pas <- graficarconeli(fphyas, ordas, "RA")
+psch <- graficarconeli(fphysch, ordsch, "schizofrenia")
+#pbd <- graficarconeli(fphybd, ordbd, "BD")
+
+
+library(grid)
+# grid.arrange(pacvd, pibd , phyp,  ncol=2, nrow = 2)
+# grid.arrange(pcrc1, pcrc2 , pcrc3, pcrc4, ncol=2, nrow = 2, top=textGrob ("CRC vs Healthy", gp=gpar(fontsize=22,font=10)))# top = "CRC vs Healthy")
+# grid.arrange(pt2d1, pt2d2, ncol=2, nrow=1, top= textGrob ("T2D vs Healthy", gp=gpar(fontsize=22,font=10)))
+
+pacvd
+pibd
+phyp
+pcrc1
+pcrc2
+pcrc3
+pcrc4
+pt2d1
+pt2d2
+pcir
+psch
+
+```
+
+```{r anosim}
+## Here we don't need the phyloseq objects, so we prepare the counts data to separate by the study and disease / contrl
+# controlacvd <- counts %>%  dplyr::filter (study_name == "JieZ_2017") %>% filter (disease== "healthy"| disease== "ACVD")
+# controlibd <- counts %>%   filter(study_name == "HMP_2019_ibdmdb") %>% filter ( disease== "healthy"| disease=="IBD")
+# controlhyp <- counts %>%  filter(study_name ==  "LiJ_2017")  %>% filter ( disease !="pre-hypertension")
+# controlcrc1 <- counts %>% filter(study_name == "GuptaA_2019")%>% filter ( disease== "healthy"| disease=="CRC")
+# controlcrc2 <- counts %>%  filter( study_name=="HanniganGD_2017")  %>% filter (disease== "healthy"| disease=="CRC")
+# controlcrc3 <- counts %>%   filter(study_name== "ThomasAM_2018a") %>% filter (disease== "healthy"| disease=="CRC")
+# controlcrc4 <- counts %>%   filter(study_name== "ThomasAM_2018b")%>% filter (disease== "healthy"| disease=="CRC")
+# controlt2d1 <- counts %>%   filter(study_name ==  "KarlssonFH_2013")  %>% filter ( disease== "healthy"| disease=="T2D")
+# controlt2d2 <- counts %>%   filter(study_name ==  "SankaranarayananK_2015") %>% filter (disease== "healthy"| disease=="T2D")
+# controlmetsyn <- counts %>% filter (study_name == "LiSS_2016") %>%  filter(disease == "metabolic_syndrome" | disease == "healthy")
+# 
+# controladenoma1 <- counts %>% filter (study_name == "ThomasAM_2018a") %>%  filter(disease == "adenoma" | disease == "healthy")
+# controladenoma2 <- counts %>% filter (study_name == "HanniganGD_2017") %>%  filter(disease != "CRC")
+# 
+# controligt <- counts %>% filter (study_name == "KarlssonFH_2013") %>%  filter(disease == "IGT" | disease == "healthy")
+# controlcirr <- counts %>% filter (study_name == "QinN_2014") %>%  filter(disease == "cirrhosis" | disease == "healthy")
+# controlAS <-  counts %>% filter (study_name == "ChengpingW_2017" | study_name == "QinN_2014") %>% filter (disease == "RA" | disease == "healthy")
+# controlbd <- counts %>% filter (study_name == "YeZ_2018") %>% filter (disease == "BD" | disease == "healthy")
+# controlschi <- counts %>% filter (study_name == "ZhuF_2020") %>% filter (disease == "schizofrenia" | disease == "healthy")
+
+
+
+## take off bacteria with 0 ocurrences on each set and convert to a matrix
+zeros <- function(data) {
+  comun = data[,9:ncol(data)] 
+ spcero <- (colSums(comun))
+ quitar = which(spcero <= 0)
+ comun <- comun[,-c(quitar)]
+ m_com = as.matrix(comun)
+}
+
+comacvd  <- zeros (controlacvd)
+comibd <- zeros(controlibd)
+comhyp <- zeros(controlhyp)
+comcrc1 <- zeros(controlcrc1)
+comcrc2 <- zeros(controlcrc2)
+comcrc3 <- zeros(controlcrc3)
+comcrc4 <- zeros(controlcrc4)
+comt2d1 <- zeros(controlt2d1)
+comt2d2 <- zeros(controlt2d2)
+commets <- zeros(controlmetsyn)
+
+# comade1 <- zeros(controladenoma1)
+# comade2 <- zeros(controladenoma2)
+# comigt <- zeros(controligt)
+comcirr <- zeros(controlcirr)
+# comas <- zeros(controlAS)
+comsch <- zeros(controlschi)
+# combd <- zeros(controlbd)
+
+#Funtion anosim
+
+anosfunc <- function(m_com, datacounts){
+ANOSIMTEST = anosim(m_com, datacounts$disease, distance = "bray", permutations = 999)
+}
+
+#Anosim 
+an.acvd <- anosfunc(comacvd, controlacvd)
+an.ibd <-anosfunc(comibd, controlibd)
+an.hyp <- anosfunc(comhyp, controlhyp)
+an.crc1 <- anosfunc(comcrc1, controlcrc1)
+an.crc2 <- anosfunc(comcrc2, controlcrc2)
+an.crc3 <- anosfunc(comcrc3, controlcrc3)
+an.crc4 <- anosfunc(comcrc4, controlcrc4)
+an.t2d1 <- anosfunc(comt2d1, controlt2d1)
+an.t2d2 <- anosfunc(comt2d2, controlt2d2)
+an.ms <- anosfunc(commets, controlmetsyn)
+
+#an.ade1 <- anosfunc(comade1, controladenoma1)
+#an.ade2 <- anosfunc(comade2, controladenoma2)
+#an.igt <- anosfunc(comigt, controligt)
+an.cirr <- anosfunc(comcirr, controlcirr)
+#an.as <- anosfunc(comas, controlAS)
+an.sch <- anosfunc(comsch, controlschi)
+#an.bd <- anosfunc(combd, controlbd)
+
+```
+
+```{r simper}
+set.seed(7891)
+
+# function simper 
+simpfunc <- function(m_com, datacounts){
+simp = simper(m_com,  datacounts$disease, permutations = 999)
+}
+
+sim.acvd <- simpfunc (comacvd, controlacvd)
+sim.ibd <-simpfunc(comibd, controlibd)
+sim.hyp <- simpfunc(comhyp, controlhyp)
+sim.crc1 <- simpfunc(comcrc1, controlcrc1)
+sim.crc2 <- simpfunc(comcrc2, controlcrc2)
+sim.crc3 <- simpfunc(comcrc3, controlcrc3)
+sim.crc4 <- simpfunc(comcrc4, controlcrc4)
+sim.t2d1 <- simpfunc(comt2d1, controlt2d1)
+sim.t2d2 <- simpfunc(comt2d2, controlt2d2)
+sim.ms <- simpfunc(commets, controlmetsyn)
+
+# sim.ade1 <- simpfunc(comade1, controladenoma1)
+# sim.ade2 <- simpfunc(comade2, controladenoma2)
+# sim.igt <- simpfunc(comigt, controligt)
+ sim.cirr <- simpfunc(comcirr, controlcirr)
+# sim.as <- simpfunc(comas, controlAS)
+ sim.sch <- simpfunc(comsch, controlschi)
+# sim.bd <- simpfunc(combd, controlbd)
+
+## extract results of species that explain 70% of the difference
+sumsimacvd <- (as.data.frame(sim.acvd[["healthy_ACVD"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimacvd[1,3] <- 7.43  ## the first percentage is not calculated by the previous script
+ sumsimacvd2 <- separate(sumsimacvd, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum) %>% rename ("c%_ACVD" = perc_contribution, "p_ACVD" = p)
+
+sumsimpibd <- (as.data.frame(sim.ibd[["IBD_healthy"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimpibd[1,3] <- 12.9
+sumsimpibd2 <- separate(sumsimpibd, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum)%>% rename ("c%_IBD" = perc_contribution, "p_IBD" = p)
+
+ sumsimphyp<- (as.data.frame(sim.hyp[["hypertension_healthy"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimphyp[1,3] <- 20.33
+sumsimphyp2 <- separate(sumsimphyp, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum)%>% rename ("c%_Hyp" = perc_contribution, "p_Hyp" = p)
+
+sumsimcrc1<- (as.data.frame(sim.crc1[["CRC_healthy"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p) 
+sumsimcrc1[1,3] <- 25.6
+sumsimcrc11 <- separate(sumsimcrc1, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum) %>% rename ("c%_CRC1" = perc_contribution, "p_CRC1" = p)
+
+ sumsimcrc2<- (as.data.frame(sim.crc2[["CRC_healthy"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimcrc2[1,3] <- 7.72
+sumsimcrc22 <- separate(sumsimcrc2, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum) %>% rename ("c%_CRC2" = perc_contribution, "p_CRC2" = p)
+
+ sumsimcrc3<- (as.data.frame(sim.crc3[["healthy_CRC"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimcrc3[1,3] <- 8.88
+sumsimcrc33 <- separate(sumsimcrc3, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum)%>% rename ("c%_CRC3" = perc_contribution, "p_CRC3" = p)
+
+ sumsimcrc4<- (as.data.frame(sim.crc4[["CRC_healthy"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimcrc4[1,3] <- 6.8
+sumsimcrc44 <- separate(sumsimcrc4, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum)%>% rename ("c%_CRC4" = perc_contribution, "p_CRC4" = p)
+
+sumsimt2d1<- (as.data.frame(sim.t2d1[["healthy_T2D"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimt2d1[1,3] <- 5.7
+sumsimt2d11 <- separate(sumsimt2d1, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum)%>% rename ("c%_T2D1" = perc_contribution, "p_T2D1" = p)
+
+sumsimt2d2<- (as.data.frame(sim.t2d2[["T2D_healthy"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimt2d2[1,3] <- 6.32
+sumsimt2d22 <- separate(sumsimt2d2, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum)%>% rename ("c%_T2D2" = perc_contribution, "p_T2D2" = p)
+
+sumsimms<- (as.data.frame(sim.ms[["metabolic_syndrome_healthy"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimms[1,3] <- 7.74
+sumsimms1 <- separate(sumsimms, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum)%>% rename ("c%_metabolic_syndrome" = perc_contribution, "p_MS" = p)
+
+sumsimcirr<- (as.data.frame(sim.cirr[["healthy_cirrhosis"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimcirr[1,3] <- 11.28
+sumsimcirr2 <- separate(sumsimcirr, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum)%>% rename ("c%_cirrhosis" = perc_contribution, "p_cirrhosis" = p)
+
+sumsimsch<- (as.data.frame(sim.sch[["healthy_schizofrenia"]]))  %>% dplyr::filter(cusum <= 0.7) %>%  mutate (perc_contribution= (cusum - lag(cusum, default = first(cusum)))*100) %>%  dplyr::select (species,cusum,perc_contribution, p)
+sumsimsch[1,3] <- 21.08
+sumsimsch2 <- separate(sumsimsch, species, into = (c("largename","taxa")), sep= "s__", remove =TRUE) %>% dplyr::select(-largename, -cusum)%>% rename ("c%_schizofrenia" = perc_contribution, "p_schizofrenia" = p)
+
+## paste all to create the final table of results
+perc <- full_join (sumsimacvd2, sumsimpibd2)
+perc <- full_join (perc,sumsimphyp2 )
+perc <- full_join (perc, sumsimms1)
+percCRC <- full_join(sumsimcrc11, sumsimcrc22)
+percCRC <- full_join(percCRC, sumsimcrc33)
+percCRC <- full_join(percCRC, sumsimcrc44)
+
+allperc <- full_join(perc, percCRC)
+
+ALPERC <- full_join(allperc, sumsimt2d11)
+alperc <- full_join(ALPERC, sumsimt2d22)
+
+simperresult <- alperc %>% select("taxa" , "c%_ACVD", "c%_IBD", "c%_Hyp" ,  "c%_metabolic_syndrome", "c%_CRC1", "c%_CRC2", "c%_CRC3", "c%_CRC4", "c%_T2D1" ,   "c%_T2D2")   
+  
+
+knitr::kable(simperresult,  digits = 2)# , format="latex")     
+
+# only rhythmic bacteria and associated table
+simperhytmic <- full_join(simperresult, rhyt)
+## non-circadian associated
+perc2 <- full_join(sumsimsch2, sumsimcirr2)
+
+simperresultnon <- perc2 %>% select("taxa" , "c%_cirrhosis", "c%_schizofrenia")
+simperhytmicnon <- full_join(simperresultnon, rhyt)
+
+knitr::kable(simperresultnon,  digits = 2 , format="latex")     
+
+## in the table we see that are some bacteria appear in most diseases with a high contribution
+## we are going to visualize this
+
+simperfull_summarized <- simperfull %>% select(-Rhythmicity) %>%  mutate(total_contribution = rowSums(select(., starts_with("c%")), na.rm = T)) %>% select(taxa, total_contribution)
+
+bacteria_frequency <- simperfull %>% gather(disease, contribution, starts_with("c%")) %>% group_by(taxa) %>%
+  summarize(frequency = sum(!is.na(contribution)))
+
+simperanal <- full_join(simperfull_summarized, bacteria_frequency)
+
+qplot((frequency), log(total_contribution), data = simperanal,  alpha = I(0.8),  size=I(0.7), xlab = "frequency of contributing" , ylab = "sum contribution" ) + theme (legend.position = "none", panel.background = element_rect(fill = "white", colour = "black", linewidth =1.5), panel.grid.major.x = element_blank()) 
+
+```
+
+```{r PERMANOVA }
+## analisis permanova we use phyloseq object
+
+permanova.analisis <- function(phylodata){
+ meta <- as(sample_data(phylodata), "data.frame")
+perm <- adonis2(distance(phylodata, method="bray") ~ Disease, data = meta, by = "margin") 
+return(perm)
+}
+
+kable(acvdperm <- permanova.analisis(fphyacvd) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "ACVD"), "latex", digits = 3)
+kable(ibdperm <- permanova.analisis(fphyibd) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "IBD"), "latex", digits = 3)
+kable(hypperm <- permanova.analisis(fphyhyp) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "Hypertension"), "latex", digits = 3)
+kable(crc1perm <- permanova.analisis(fphycrc1) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "CRC1"), "latex", digits = 3)
+kable(crc2perm <- permanova.analisis(fphycrc2) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "CRC2"), "latex", digits = 3)
+kable(crc3perm <- permanova.analisis(fphycrc3) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "CRC3"))#, "latex", digits = 3)
+kable(crc4perm <- permanova.analisis(fphycrc4) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "CRC4"))#, "latex", digits = 3)
+kable(t2d1perm <- permanova.analisis(fphyt2d1) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "T2D1"))#, "latex", digits = 3)
+kable(t2d2perm <- permanova.analisis(fphyt2d2) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "T2D2"))#, "latex", digits = 3)
+kable(metsperm <- permanova.analisis(fphymets) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "Metabolic Syndrome"))#, "latex", digits = 3)
+
+allres <- rbind(acvdperm, ibdperm, hypperm,crc1perm, crc2perm, crc3perm, crc4perm, t2d1perm, t2d2perm) %>% select(Disease, everything())
+#kable(allres, "latex", digits=3)
+
+#kable(ade1perm <- permanova.analisis(fphyade1) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "Adenoma1"), "latex", digits = 3)
+#kable(ade2perm <- permanova.analisis(fphyade2) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "Adenoma2"), "latex", digits = 3)
+#kable(igtperm <- permanova.analisis(fphyigt) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "IGT"), "latex", digits = 3)
+#kable(asperm <- permanova.analisis(fphyas) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "AS"))#, "latex", digits = 3)
+kable(cirrperm <- permanova.analisis(fphycirr) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "Cirrhosis"))#, "latex", digits = 3)
+kable(schperm <- permanova.analisis(fphysch) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "Schizofrenia"))#, "latex", digits = 3)
+#kable(bdperm <- permanova.analisis(fphybd) %>% rownames_to_column( var="Disease") %>% filter(Disease == "Disease") %>% select("R2", "Pr(>F)") %>% mutate(Disease = "BD"))#, "latex", digits = 3)
+
+allresnon <- rbind(ade1perm, ade2perm, igtperm, asperm, cirrperm, schperm, bdperm) %>% select(Disease, everything())
+
+```
+
+```{r Significantly different taxa Kruskal-Wallis}
+
+# First transform count data in the phyloseq object into relative abundance data
+abracvd <- transform_sample_counts(fphyacvd, function(x) x / sum(x)*100) 
+abribd <- transform_sample_counts(fphyibd, function(x) x / sum(x)*100)
+abrhyp <- transform_sample_counts(fphyhyp, function(x) x / sum(x)*100)
+abrcrc1 <-  transform_sample_counts(fphycrc1, function(x) x / sum(x)*100)
+abrcrc2 <-  transform_sample_counts(fphycrc2, function(x) x / sum(x)*100)
+abrcrc3 <-  transform_sample_counts(fphycrc3, function(x) x / sum(x)*100)
+abrcrc4 <- transform_sample_counts(fphycrc4, function(x) x / sum(x)*100)
+abrt2d1 <- transform_sample_counts(fphyt2d1, function(x) x / sum(x)*100)
+abrt2d2 <- transform_sample_counts(fphyt2d2, function(x) x / sum(x*100))
+abrmets <- transform_sample_counts(fphymets, function(x) x / sum(x*100))
+
+# abrade1 <- transform_sample_counts(fphyade1, function(x) x / sum(x)*100)
+# abrade2 <-  transform_sample_counts(fphyade2, function(x) x / sum(x) *100)
+# abras <-  transform_sample_counts(fphyas, function(x) x / sum(x)*100)
+ abrcirr <-  transform_sample_counts(fphycirr, function(x) x / sum(x)*100)
+ abrsch <- transform_sample_counts(fphysch, function(x) x / sum(x)*100)
+# abrbd <- transform_sample_counts(fphybd, function(x) x / sum(x)*100)
+# abrigt <- transform_sample_counts(fphyigt, function(x) x / sum(x*100))
+
+## function to calculate differences and fdr
+kwcompleta <- function(data) {
+    # extract sample ids metadata
+    sd <- sample_data(data)
+    sd<- (as(sd,"data.frame"))
+    metadat <- rownames_to_column(sd, var ="sample_id")
+ 
+    OTU <- otu_table(data)
+    if (taxa_are_rows(OTU)) {
+      OTU <- t(OTU)
+    }
+    OTU= (as(OTU, "matrix"))
+    OTU <- as.data.frame(OTU)
+    OTU <- rownames_to_column(OTU, var ="sample_id")
+  
+  # 
+  abrelconme <- merge(metadat, OTU)
+  
+  # kruskal-wallis from microbiome analysis book
+  
+    df = as.data.frame(abrelconme %>% select(-SampleId, -SampleID ,-Disease, -Study, -country, -plataforma, -gender, -age, -study_condition, -HealthState)) ## add
+    row.names(df) <- df$sample_id
+    df<- df %>% select(-sample_id)
+    
+    df_ch <- as.data.frame(abrelconme %>% select(sample_id, Disease))
+    
+    KW_table <- data.frame()
+    for (i in 1:dim(df)[2]) {
+      #run KW test for each bacterium
+      KW_test <- kruskal.test(df[,i], g=df_ch$Disease)
+      # Store the result in the data frame
+      KW_table <- rbind(KW_table,
+      data.frame(id=names(df)[i],
+      p.value=KW_test$p.value ))
+      #    Report number of bacteria tested
+      cat(paste("Kruskal-Wallis test for ", names(df)[i]," ", i, "/",
+      dim(df)[2], "; p-value=", KW_test$p.value,"\n", sep=""))
+    }
+    ## test  false discovery rate
+    # E-value -> expected number of false positives by chance when you make multiple test
+    KW_table$E.value <-KW_table$p.value * dim(KW_table)[1] 
+    #FWER -> probability of making at least one false positive
+    KW_table$FWER <- pbinom(q=0, p=KW_table$p.value,size=dim(KW_table)[1], lower.tail=FALSE)
+
+    # para el FDR hay varios pasos
+
+    KW_table <- KW_table[order(KW_table$p.value, decreasing=FALSE), ] # ordenar del menor a mayor
+
+    KW_table$q.value.factor <- dim(KW_table)[1] / 1:dim(KW_table)[1]
+    KW_table$q.value <- KW_table$p.value * KW_table$q.value.factor
+   
+    KW_table2 <- separate (KW_table, id, into = (c("t","taxa" )), sep= "s__", extra = "merge", remove =T)
+    KW_table3 <- KW_table2 %>% select  (-t)
+    #KW_table4 <- left_join(KW_table3 , listaritypar) ## agregar la columna rítmicas
+    return(KW_table3)
+  }
+
+kw_acvd <- kwcompleta(abracvd); 
+kw_ibd <- kwcompleta(abribd);
+kw_hyp <- kwcompleta(abrhyp);
+kw_mets <- kwcompleta(abrmets);
+      
+kw_crc1 <- kwcompleta(abrcrc1);
+kw_crc2 <- kwcompleta(abrcrc2);
+kw_crc3 <- kwcompleta(abrcrc3);
+kw_crc4 <- kwcompleta(abrcrc4);
+
+kw_t2d1 <- kwcompleta(abrt2d1);
+kw_t2d2 <- kwcompleta(abrt2d2) ;
+
+# kw_ade1 <- kwcompleta(abrade1);
+# kw_ade2 <- kwcompleta(abrade2);
+# kw_as <- kwcompleta(abras);
+ kw_cir <- kwcompleta(abrcirr);
+ kw_sch <- kwcompleta(abrsch);
+# kw_bd <- kwcompleta(abrbd);
+# kw_igt <- kwcompleta(abrigt);
+
+## finally we extract only the significant species according to FDR or q.value
+significant <- function(kwres){
+  solosignificant <- kwres %>%  filter (q.value <= 0.1)
+  return(solosignificant)
+}
+
+sacvd <- significant(kw_acvd)
+sibd<- significant(kw_ibd)
+shyp <- significant(kw_hyp) 
+smes <- significant(kw_mets)
+scrc1 <- significant(kw_crc1)
+scrc2 <- significant(kw_crc2)
+scrc3 <- significant(kw_crc3)
+scrc4 <- significant(kw_crc4)
+st2d1 <- significant(kw_t2d1)
+st2d2 <- significant(kw_t2d2)
+ 
+# sade1<- significant(kw_ade1)
+# sade2 <- significant(kw_ade2) 
+# sas <- significant(kw_as)
+ scirr <- significant(kw_cir)
+ ssch <- significant(kw_sch)
+# sbd <- significant(kw_bd)
+# sigt <- significant(kw_igt)
+
+## summary of al the bacteria
+sigbydisease <- c("sacvd", "sibd", "shyp", "smes", "scrc1", "scrc2", "scrc3", "scrc4", "st2d1", "st2d2", "scirr", "ssch")
+
+ressigkw <- kable(list(sacvd, scrc1, scrc4, st2d1) %>% map(~select(.x,taxa, p.value, q.value.factor, q.value)) %>% map(~ .x %>% dplyr::mutate_if(is.numeric, funs(as.character(signif(., 3))))))
+ressigkw
+#kable(list(sacvd, scrc1, scrc4, st2d1)  %>% map(~select(.x,taxa, p.value, q.value.factor, q.value)) %>% map(~ .x %>% dplyr::mutate_if(is.numeric, funs(as.character(signif(., 2))))), "latex")
+
+kable(list(scirr, ssch)  %>% map(~select(.x,taxa, p.value, q.value.factor, q.value)) %>% map(~ .x %>% dplyr::mutate_if(is.numeric, funs(as.character(signif(., 2))))), "latex")
+
+```
+
+```{r boxplot rhythmic significantly different, fig.height = 3, fig.width= 4}
+#rhyt <- rhyt %>% dplyr::rename(taxa = "Bacteria")
+r.sig.acvd <- sacvd %>% inner_join(rhyt, by= "taxa") 
+r.sig.crc1 <- scrc1 %>% inner_join(rhyt, by= "taxa") 
+
+r.sig.cirr <- scirr %>% inner_join(rhyt, by= "taxa") 
+
+signACVD <- r.sig.acvd$taxa
+signCRC1 <- r.sig.crc1$taxa
+signCirr <- r.sig.cirr$taxa
+
+# function to get rhythmic bacteria as rel abundance
+df.sign <- function(data, significant.list){
+  sd <- sample_data(data)
+    sd<- (as(sd,"data.frame"))
+    metadat <- rownames_to_column(sd, var ="sample_id")
+ 
+    OTU <- otu_table(data)
+    if (taxa_are_rows(OTU)) {
+      OTU <- t(OTU)
+    }
+    OTU= (as(OTU, "matrix"))
+    OTU <- as.data.frame(OTU)
+    OTU <- rownames_to_column(OTU, var ="sample_id")
+  
+  # 
+  abrelconme <- merge(metadat, OTU)
+  abrelconme <- abrelconme %>% select(-sample_id, -SampleId, -study_condition, -Study, -gender, -country, -plataforma, -age, -HealthState, -SampleID)
+  dfa <- gather(abrelconme, taxa, rel_abundance, starts_with("k__"))
+  dfa <- separate (dfa, taxa, into = (c("t","taxa" )), sep= "s__", extra = "merge", remove =T) %>% select(-t)
+
+  dfa2 <- filter(dfa, taxa %in% significant.list)
+  }   
+
+dfacvd<- df.sign(abracvd, signACVD) 
+dfcrc1<- df.sign(abrcrc1, signCRC1)
+dfcirr<- df.sign(abrcirr, signCirr)
+   
+# dfpmeanacvd <- dfacvd %>% group_by(Disease, taxa) %>%  summarise(meanrel_abundance= mean(rel_abundance) )
+# dfpmeancrc1 <- dfcrc1  %>% group_by(Disease, taxa) %>%  summarise(meanrel_abundance= mean(rel_abundance) )
+                    
+abboxplot <- function(data, disease, tit) {
+    color_values <- c(disease = "purple", healthy = "turquoise")
+    legend_labels <- c("disease" = "Disease", "healthy" = "Healthy")
+    
+    max_sd <- max(sapply(split(data$rel_abundance, data$taxa), sd), na.rm = TRUE)
+    xlim_upper <- max_sd + 5  
+
+    ggplot(data, aes(x = rel_abundance, y = taxa, fill = ifelse(Disease == disease, "disease", "healthy"))) +
+        geom_boxplot(position = position_dodge(width = 0.8), linewidth = 0.3, coef = 1.5, outlier.shape = NA) +
+        stat_summary(fun.data = function(d) {
+            y <- mean(d$y)
+            ymin <- mean(d$y) - sd(d$y)
+            ymax <- mean(d$y) + sd(d$y)
+            data.frame(y = y, ymin = ymin, ymax = ymax)
+        }, 
+        geom = "errorbarh", position = position_dodge(width = 0.8), 
+        color = "black", size = 0.5) +
+        scale_fill_manual(values = color_values, labels = legend_labels) +
+        labs(x = "Relative abundance (%)", y = NULL, title = tit) + 
+        theme_bw(base_size = 12) + 
+        theme(
+            legend.position = c(0.95, 0.95), ## in c and d legend position none in A c(0.95, 0.95)
+            legend.text = element_text(size = 16),
+            legend.title = element_blank(),
+            legend.justification = c("right", "top"),
+            legend.background = element_rect(fill = alpha('white', 0.8)),
+            axis.text.y = element_text(face = "italic", size = 18),
+            axis.text.x = element_text(size = 18),
+            axis.title.x = element_text(size = 18),
+            plot.title = element_text(face = "bold", size = 20, hjust = 0.5),
+            panel.grid.major = element_blank(),  # Remove major grid lines
+            panel.grid.minor = element_blank(),  # Remove minor grid lines
+            panel.border = element_rect(color = "black", fill = NA, size = 1)) +
+      
+      xlim(0, xlim_upper)  
+}
+
+
+taxasACVD <- abboxplot(dfacvd, "ACVD", "ACVD")
+taxasCRC <- abboxplot(dfcrc1, "CRC", "CRC")
+taxascir <- abboxplot(dfcirr, "cirrhosis", "Cirrhosis")
+
+taxasACVD
+taxasCRC
+taxascir
+```
+
+```{r venn diagram, fig.height = 8, fig.width= 16}
+library(VennDiagram)
+
+v <- venn.diagram(x= list(sacvd$taxa, scirr$taxa, scrc1$taxa), category.names = c("ACVD", "Cirrhosis", "CRC"),filename = "venn_diag_allACVDCRCCir.png", output=TRUE)
+
+# Define the sets (diseases) and their associated bacteria
+cirrhosis <- c("Bacteroides_vulgatus", "Dorea_formicigenerans", "Ruminococcus_gnavus", "Bacteroides_uniformis")
+ACVD <- c("Ruminococcus_gnavus", "Bacteroides_uniformis", "Roseburia_faecis")
+CRC <- c("Roseburia_faecis", "Ruminococcus_gnavus", "Bacteroides_vulgatus")
+
+ven <- venn.diagram(list(ACVD = ACVD, CRC = CRC, Cirrhosis = cirrhosis), fill = c("red", "green", "blue"),
+             alpha = c(0.5, 0.5, 0.5), cat.cex = 1.5, cex=1.5,
+                  filename=NULL)
+
+ven[[7]]$label <- expression("133")
+ven[[8]]$label <- expression(italic("R. Faecis"))
+ven[[9]]$label <- "65"
+ven[[10]]$label <- expression(italic("B. uniformis"))
+ven[[11]]$label <- expression(italic("R. gnavus"))
+ven[[12]]$label <- expression(italic("B. vulgatus"))
+ven[[13]]$label <- expression(atop(italic("D. formicigenerans"), "170"))
+# Draw the Venn diagram
+grid.newpage()
+grid.draw(ven)
+
+diffplots <- cowplot::plot_grid(ven, taxasACVD, taxasCRC, taxascir, ncol=2, nrow = 2,
+                   labels =c("A", "B", "C", "D"), label_size = 26,
+                   label_x = c(0.94,0.93,0.93,0.93))
+
+diffplots
+```
+
+
+
+
+
+
+
+
+
+
+
+
